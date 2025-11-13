@@ -1,167 +1,18 @@
 import json
 from datetime import date, datetime, timedelta
-from pathlib import Path
+from typing import List, Dict, Any
 
 import streamlit as st
 from openai import OpenAI
 
-# =========================
-# CONFIGURAÇÃO BÁSICA
-# =========================
+# ---------------- CONFIG BÁSICA ----------------
+st.set_page_config(page_title="ContentForge v9.1", layout="wide")
 
-st.set_page_config(
-    page_title="ContentForge v9.0",
-    page_icon="🍏",
-    layout="wide",
-)
-
-# Caminhos para ficheiros de dados
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-PLANNER_PATH = DATA_DIR / "planner.json"
-HISTORY_PATH = DATA_DIR / "history.json"
-
-# Cliente OpenAI (usa a variável de ambiente OPENAI_API_KEY no Streamlit Cloud)
-client = OpenAI()
-
-# =========================
-# ESTILO PERSONALIZADO
-# =========================
-
-PRIMARY_GREEN = "#29c46a"  # usa este para combinar com a imagem do post
-ACCENT_YELLOW = "#ffde59"
-
-CUSTOM_CSS = f"""
-<style>
-:root {{
-    --cf-primary: {PRIMARY_GREEN};
-    --cf-accent: {ACCENT_YELLOW};
-}}
-
-.stApp {{
-    background-color: #050509;
-}}
-
-.sidebar .stSelectbox label,
-.sidebar .stTextInput label,
-.sidebar .stNumberInput label {{
-    font-weight: 500;
-}}
-
-button[kind="primary"], .stButton>button {{
-    border-radius: 999px;
-    border: none;
-    font-weight: 600;
-}}
-
-.badge-reco {{
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255, 222, 89, 0.12);
-    color: #f9e27b;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    border: 1px solid rgba(255, 222, 89, 0.4);
-    margin-bottom: 6px;
-}}
-
-.badge-reco span.icon {{
-    font-size: 0.95rem;
-}}
-
-.hashtag-pill {{
-    display: inline-block;
-    background: #11141a;
-    border-radius: 999px;
-    padding: 3px 9px;
-    font-size: 0.78rem;
-    margin-right: 4px;
-    margin-bottom: 4px;
-    border: 1px solid #202632;
-}}
-
-.metric-pill {{
-    background: #0c1118;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 0.78rem;
-    margin-right: 6px;
-}}
-
-.planner-card {{
-    background: #0c1118;
-    border-radius: 12px;
-    padding: 10px 12px;
-    border: 1px solid #141a24;
-    margin-bottom: 6px;
-    font-size: 0.82rem;
-}}
-
-.planner-card-title {{
-    font-weight: 600;
-    margin-bottom: 2px;
-}}
-
-.planner-day-header {{
-    font-weight: 600;
-    font-size: 0.9rem;
-    margin-bottom: 8px;
-}}
-
-.small-muted {{
-    font-size: 0.78rem;
-    color: #8891a7;
-}}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+client = OpenAI()  # OPENAI_API_KEY vem das secrets/env
 
 
-# =========================
-# HELPERS DE DADOS
-# =========================
-
-def load_json(path: Path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-def save_json(path: Path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_planner():
-    return load_json(PLANNER_PATH, [])
-
-
-def save_planner(events):
-    save_json(PLANNER_PATH, events)
-
-
-def load_history():
-    return load_json(HISTORY_PATH, [])
-
-
-def save_history(posts):
-    save_json(HISTORY_PATH, posts)
-
-
-def new_id():
-    # id simples baseado em timestamp
-    return f"p_{int(datetime.utcnow().timestamp() * 1000)}"
-
-
-# =========================
-# GESTÃO DE SESSÃO
-# =========================
-
-def init_session_state():
+# ---------------- ESTADO INICIAL ----------------
+def init_state():
     today = date.today().isoformat()
     if "gen_date" not in st.session_state:
         st.session_state.gen_date = today
@@ -170,85 +21,158 @@ def init_session_state():
         st.session_state.gen_date = today
         st.session_state.gen_count = 0
 
-    if "planner_date" not in st.session_state:
-        st.session_state.planner_date = today
-        st.session_state.planner_added_today = 0
-    if st.session_state.planner_date != today:
-        st.session_state.planner_date = today
-        st.session_state.planner_added_today = 0
+    if "planner_events" not in st.session_state:
+        # cada evento: {id, day, time, title, platform, caption, hashtags, completed, score}
+        st.session_state.planner_events: List[Dict[str, Any]] = []
 
-    if "anchor_date" not in st.session_state:
-        st.session_state.anchor_date = date.today()
+    if "week_anchor" not in st.session_state:
+        st.session_state.week_anchor = date.today()
 
-    if "last_variations" not in st.session_state:
-        st.session_state.last_variations = []
-        st.session_state.last_analysis = []
+    if "generated_variations" not in st.session_state:
+        st.session_state.generated_variations: List[Dict[str, Any]] = []
 
 
-def safe_rerun():
-    # compat entre versões de streamlit
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
+init_state()
 
 
-# =========================
-# PROMPT – GERAÇÃO PREMIUM
-# =========================
+# ---------------- PLANOS ----------------
+PLAN_CONFIG = {
+    "Starter": {
+        "daily_generations": 5,
+        "analysis": False,
+        "performance": False,
+    },
+    "Pro": {
+        "daily_generations": 50,
+        "analysis": True,
+        "performance": True,
+    },
+}
 
+
+def get_plan_limits(plan: str) -> Dict[str, Any]:
+    return PLAN_CONFIG[plan]
+
+
+# ---------------- HELPERS GERAIS ----------------
+def week_bounds(anchor: date):
+    monday = anchor - timedelta(days=anchor.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
+
+
+def score_caption(caption: str) -> Dict[str, float]:
+    """Pseudo-análise local para o Pro (sem segunda chamada à API)."""
+    text = caption.lower()
+    length = len(caption)
+
+    has_offer = any(k in text for k in ["desconto", "%", "promo", "oferta"])
+    has_cta = any(
+        k in text
+        for k in ["link na bio", "clica", "envia mensagem", "comenta", "guarda"]
+    )
+    has_emotion = any(
+        k in text for k in ["história", "sonho", "confiança", "incrível", "magia"]
+    )
+
+    clareza = 7.0
+    if 80 <= length <= 260:
+        clareza += 2
+    elif length < 60:
+        clareza -= 1
+    elif length > 400:
+        clareza -= 1.5
+
+    conversao = 6.0 + (1.5 if has_offer else 0) + (1.5 if has_cta else 0)
+    engaj = 6.0 + (1.5 if has_emotion else 0)
+    emocao = 6.0 + (2.0 if has_emotion else 0)
+    cred = 7.0
+    adequ = 7.0
+
+    def clamp(x: float) -> float:
+        return max(0.0, min(10.0, x))
+
+    metrics = {
+        "claridade": round(clamp(clareza), 1),
+        "conversao": round(clamp(conversao), 1),
+        "engajamento": round(clamp(engaj), 1),
+        "emocao": round(clamp(emocao), 1),
+        "credibilidade": round(clamp(cred), 1),
+        "adequacao": round(clamp(adequ), 1),
+    }
+    final = (
+        metrics["conversao"] * 0.3
+        + metrics["engajamento"] * 0.25
+        + metrics["claridade"] * 0.15
+        + metrics["adequacao"] * 0.15
+        + metrics["emocao"] * 0.1
+        + metrics["credibilidade"] * 0.05
+    )
+    metrics["score_final"] = round(final, 1)
+    return metrics
+
+
+# ---------------- PROMPT GERAÇÃO ----------------
 def build_generation_prompt(
-    brand, niche, tone, platform, copy_mode, goal, extra, plan
-):
-    tono_txt = {
+    brand: str,
+    niche: str,
+    tone: str,
+    platform: str,
+    copy_mode: str,
+    goal: str,
+    extra: str,
+    plan: str,
+) -> str:
+    tone_map = {
         "profissional": "profissional, objetivo mas humano",
-        "premium": "premium, elegante, com vocabulário cuidado",
+        "premium": "premium, elegante, linguagem cuidada",
         "emocional": "emocional, próximo e empático",
-        "casual": "casual, descontraído, próximo de conversa",
-    }.get(tone, "profissional, humano")
+        "casual": "casual, descontraído, estilo conversa",
+    }
+    tone_txt = tone_map.get(tone, "profissional, humano")
 
-    copy_mode_txt = {
-        "Venda": "foco máximo em conversão e vendas",
-        "Storytelling": "foco em história e construção de relação",
-        "Educacional": "foco em ensinar algo útil e prático",
-    }.get(copy_mode, "equilíbrio entre valor e vendas")
+    mode_map = {
+        "Venda": "foco em conversão e vendas",
+        "Storytelling": "foco em história e ligação emocional",
+        "Educacional": "foco em ensinar algo útil e aplicável",
+    }
+    mode_txt = mode_map.get(copy_mode, "equilíbrio entre valor e conversão")
 
-    pro_level = (
-        "Estás no modo PRO: assume que o utilizador é exigente, evita frases vagas, "
-        "cria algo que ele consiga literalmente copiar e colar num post real."
+    pro_txt = (
+        "Estás no modo PRO: o utilizador é exigente, o texto tem de parecer escrito por um copywriter sénior."
         if plan == "Pro"
-        else "Estás no modo Starter: mantém uma copy boa mas sem exagerar na complexidade."
+        else "Estás no modo Starter: mantém texto simples mas profissional."
     )
 
     return f"""
-Quero que cries VARIAÇÕES de legendas para redes sociais em PT-PT.
+Quero que cries 3 VARIAÇÕES de legendas em PT-PT para redes sociais.
 
 Marca: {brand}
 Nicho: {niche}
 Plataforma: {platform}
-Tom de voz: {tono_txt}
-Modo de copy: {copy_mode_txt}
-Objetivo de hoje: {goal or "não especificado"}
+Tom de voz: {tone_txt}
+Modo de copy: {mode_txt}
+Objetivo do dia: {goal or "não especificado"}
 Informação extra relevante: {extra or "nenhuma informação extra"}
-Plano: {plan}
-{pro_level}
+{pro_txt}
 
-REGRAS MUITO IMPORTANTES:
-- NÃO repitas literalmente as frases que o utilizador escreveu no objetivo ou informação extra.
-- Usa as ideias, mas reescreve, melhora, aprofunda.
-- Frases curtas, respiráveis, fáceis de ler no telemóvel.
-- Usa EMOJIS com intenção (no máximo 3–4 por legenda).
-- Inclui SEMPRE um CTA claro no fim (ex: "Descobre tudo no site", "Envia mensagem", etc.).
-- Adapta o estilo à plataforma (Instagram = mais visual/emocional, TikTok = ritmo e gancho forte).
+Regras:
+- NÃO copies literalmente frases do utilizador (especialmente 'quero levar as pessoas ao site'). Reescreve de forma profissional.
+- Frases curtas, respiráveis, boas para ler no telemóvel.
+- Usa emojis com intenção (máx. 3–4 por legenda).
+- Inclui SEMPRE um CTA no fim (mas não repitas o mesmo CTA nas 3 variações).
+- Adapta o estilo à plataforma (Instagram = mais visual/emocional).
 
-Quero exatamente 3 variações (A, B, C), cada uma com:
-- "titulo": título curto para o Planner (máx. 60 caracteres)
-- "legenda": texto completo pronto a colar
-- "hashtags": lista com 10 a 15 hashtags relevantes (sem #genérico tipo #love)
-- "cta": frase final de chamada à ação (também incluída na legenda)
-- "angulo": descrição rápida do ângulo criativo (ex: urgência, bastidores, prova social)
+Para cada variação (A, B, C) devolve:
+- "id": "A" ou "B" ou "C"
+- "titulo": título curto para o planner (máx. 60 caracteres)
+- "legenda": texto completo (inclui o CTA no fim)
+- "hashtags": lista com 10–15 hashtags relevantes (sem #love, #insta, etc.)
+- "cta": a frase final de chamada à ação
+- "angulo": descrição rápida do ângulo (ex: urgência, bastidores, story, prova social)
 
-DEVES RESPONDER APENAS EM JSON COM A ESTRUTURA:
+Formata a resposta EXCLUSIVAMENTE como JSON com esta estrutura:
+
 {{
   "variacoes": [
     {{
@@ -259,22 +183,36 @@ DEVES RESPONDER APENAS EM JSON COM A ESTRUTURA:
       "cta": "...",
       "angulo": "..."
     }},
-    {{ ... B ... }},
-    {{ ... C ... }}
+    {{
+      "id": "B",
+      "titulo": "...",
+      "legenda": "...",
+      "hashtags": ["#exemplo", "..."],
+      "cta": "...",
+      "angulo": "..."
+    }},
+    {{
+      "id": "C",
+      "titulo": "...",
+      "legenda": "...",
+      "hashtags": ["#exemplo", "..."],
+      "cta": "...",
+      "angulo": "..."
+    }}
   ]
 }}
 """
 
 
-def call_openai_json(prompt: str, model: str = "gpt-4.1-mini", temperature: float = 0.9):
+def call_openai_json(prompt: str) -> Dict[str, Any]:
     resp = client.chat.completions.create(
-        model=model,
-        temperature=temperature,
+        model="gpt-4.1-mini",
+        temperature=0.9,
         response_format={"type": "json_object"},
         messages=[
             {
                 "role": "system",
-                "content": "És um copywriter sénior de social media a trabalhar para gestores de marca exigentes.",
+                "content": "És um copywriter sénior de social media que escreve como um humano, em PT-PT.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -283,110 +221,15 @@ def call_openai_json(prompt: str, model: str = "gpt-4.1-mini", temperature: floa
     return json.loads(content)
 
 
-# =========================
-# ANÁLISE AUTOMÁTICA v8.2
-# =========================
-
-def analyse_variations(variations, platform, tone, copy_mode):
-    """Devolve lista de dicts com scores por variação."""
-    text_blocks = []
-    for v in variations:
-        text_blocks.append(
-            {
-                "id": v["id"],
-                "titulo": v["titulo"],
-                "legenda": v["legenda"],
-            }
-        )
-
-    prompt = f"""
-Quero que analises estas legendas para {platform}.
-
-Tom de voz pretendido: {tone}
-Modo de copy: {copy_mode}
-
-Para CADA variação avalia:
-- clareza (0-10)
-- conversao (0-10) -> potencial de gerar cliques/vendas/mensagens
-- engajamento (0-10) -> potencial de gerar comentários, partilhas, saves
-- emocao (0-10)
-- credibilidade (0-10)
-- adequacao_plataforma (0-10)
-
-Depois calcula:
-- score_final (0-10) -> média ponderada, com peso maior para conversão e engajamento
-- recomendado (true/false) -> se achas que é a melhor opção para usar.
-
-Responde APENAS em JSON:
-{{
-  "avaliacoes": [
-    {{
-      "id": "A",
-      "clareza": 0,
-      "conversao": 0,
-      "engajamento": 0,
-      "emocao": 0,
-      "credibilidade": 0,
-      "adequacao_plataforma": 0,
-      "score_final": 0,
-      "recomendado": false
-    }},
-    ...
-  ]
-}}
-"""
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0.4,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": "És um analista de performance de social media extremamente exigente e numérico.",
-            },
-            {"role": "user", "content": json.dumps({"variacoes": text_blocks}, ensure_ascii=False)},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    data = json.loads(resp.choices[0].message.content)
-    return data.get("avaliacoes", [])
-
-
-# =========================
-# LÓGICA DE PLANO
-# =========================
-
-def get_plan_limits(plan: str):
-    if plan == "Starter":
-        return {
-            "max_gen_day": 5,
-            "max_planner_day": 5,
-            "analysis_enabled": False,
-        }
-    # Pro
-    return {
-        "max_gen_day": 100,
-        "max_planner_day": 999,
-        "analysis_enabled": True,
-    }
-
-
-# =========================
-# UI – SIDEBAR
-# =========================
-
+# ---------------- SIDEBAR ----------------
 def sidebar_profile():
-    st.sidebar.markdown("### Plano e perfil")
+    st.sidebar.header("Plano e perfil")
 
-    plan = st.sidebar.selectbox("Plano", ["Starter", "Pro"], index=1)
+    plan = st.sidebar.selectbox("Plano", ["Starter", "Pro"], index=0)
     limits = get_plan_limits(plan)
 
     st.sidebar.markdown(
-        f"**Gerações hoje:** {st.session_state.gen_count}/{limits['max_gen_day']}"
-    )
-    st.sidebar.markdown(
-        f"**Tarefas no planner hoje:** {st.session_state.planner_added_today}/{limits['max_planner_day']}"
+        f"**Gerações hoje:** {st.session_state.gen_count}/{limits['daily_generations']}"
     )
 
     st.sidebar.markdown("---")
@@ -402,76 +245,62 @@ def sidebar_profile():
         "Modo de copy", ["Venda", "Storytelling", "Educacional"], index=0
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("#### Métricas da conta (simuladas por enquanto)")
-    st.sidebar.markdown(
-        '<span class="small-muted">Integração real fica para o Pro+.</span>',
-        unsafe_allow_html=True,
-    )
-
-    seguidores = st.sidebar.number_input("Seguidores", value=1200, step=100)
-    engaj = st.sidebar.number_input("Engaj. %", value=3.4, step=0.1)
-    alcance = st.sidebar.number_input("Alcance médio", value=1400, step=50)
-
-    return plan, brand, niche, tone, copy_mode, seguidores, engaj, alcance
+    return plan, brand, niche, tone, copy_mode
 
 
-# =========================
-# PÁGINA – GERAR
-# =========================
-
-def page_generate(plan, brand, niche, tone, copy_mode):
+# ---------------- PÁGINA GERAR ----------------
+def page_generate(plan: str, brand: str, niche: str, tone: str, copy_mode: str):
     limits = get_plan_limits(plan)
 
-    st.markdown("## ⚡ Geração inteligente")
+    st.subheader("⚡ Geração inteligente de conteúdo")
 
-    col_goal, col_extra = st.columns([1, 1])
-    with col_goal:
+    col1, col2 = st.columns(2)
+    with col1:
         goal = st.text_input(
             "O que queres comunicar hoje?",
-            value="Apresentação da nova coleção de Outono",
-            max_chars=200,
+            value="Lançamento da nova coleção de Outono",
         )
-    with col_extra:
+    with col2:
         extra = st.text_area(
             "Informação extra (opcional)",
             value="Desconto de 10% no site até domingo.",
-            height=80,
+            height=70,
         )
 
-    platform = st.selectbox("Plataforma", ["instagram", "tiktok"], index=0)
+    platform = st.selectbox("Plataforma principal", ["Instagram", "TikTok"], index=0)
 
-    st.markdown("---")
+    can_generate = st.session_state.gen_count < limits["daily_generations"]
+    gen_btn = st.button("⚡ Gerar agora", disabled=not can_generate)
 
-    disabled = st.session_state.gen_count >= limits["max_gen_day"]
-    if disabled:
-        st.warning(
-            "Atingiste o limite de gerações de hoje para o teu plano. "
-            "Sobe para Pro ou volta amanhã. 💡"
-        )
+    if not can_generate:
+        st.info("Atingiste o limite de gerações de hoje para o teu plano.")
 
-    if st.button("⚡ Gerar agora", disabled=disabled, type="primary"):
-        with st.spinner("A pensar na melhor copy para ti..."):
+    if gen_btn and can_generate:
+        with st.spinner("A gerar variações com IA..."):
             prompt = build_generation_prompt(
                 brand, niche, tone, platform, copy_mode, goal, extra, plan
             )
             data = call_openai_json(prompt)
             variations = data.get("variacoes", [])
-            st.session_state.last_variations = variations
 
-            if limits["analysis_enabled"]:
-                analysis = analyse_variations(variations, platform, tone, copy_mode)
-                st.session_state.last_analysis = analysis
-            else:
-                st.session_state.last_analysis = []
+            # Análise local (apenas Pro)
+            if limits["analysis"]:
+                for v in variations:
+                    v["analysis"] = score_caption(v["legenda"])
+                best = max(
+                    variations,
+                    key=lambda v: v["analysis"]["score_final"],
+                    default=None,
+                )
+                if best:
+                    best["recommended"] = True
 
-        st.session_state.gen_count += 1
+            st.session_state.generated_variations = variations
+            st.session_state.gen_count += 1
 
-    variations = st.session_state.last_variations
-    analysis = {a["id"]: a for a in st.session_state.last_analysis}
-
+    variations = st.session_state.generated_variations
     if not variations:
-        st.info("Gera primeiro conteúdo para veres as variações aqui em baixo. 🙂")
+        st.info("Gera conteúdo para veres as variações aqui em baixo.")
         return
 
     st.markdown("### Resultados")
@@ -479,338 +308,218 @@ def page_generate(plan, brand, niche, tone, copy_mode):
     cols = st.columns(3)
     for col, var in zip(cols, variations):
         with col:
-            vid = var["id"]
-            ana = analysis.get(vid)
-            is_reco = bool(ana and ana.get("recomendado"))
-
+            vid = var.get("id", "?")
             st.markdown(f"**Variação {vid}**")
 
-            if is_reco:
-                st.markdown(
-                    '<div class="badge-reco"><span class="icon">✨</span> Nossa recomendação</div>',
-                    unsafe_allow_html=True,
-                )
+            if var.get("recommended"):
+                st.markdown("✨ **Nossa recomendação**")
 
-            st.markdown(f"**Título (para planner):** {var['titulo']}")
+            st.markdown(f"**Título (planner):** {var['titulo']}")
             st.write(var["legenda"])
 
-            st.markdown("**Hashtags sugeridas:**")
-            tags_html = " ".join(
-                f'<span class="hashtag-pill">#{t.lstrip("#")}</span>'
-                for t in var.get("hashtags", [])
-            )
-            st.markdown(tags_html, unsafe_allow_html=True)
+            st.markdown("**Hashtags:**")
+            st.code(" ".join(var.get("hashtags", [])))
 
-            if ana:
-                st.markdown("**Análise automática (Pro)**")
+            if limits["analysis"] and "analysis" in var:
+                a = var["analysis"]
                 st.markdown(
-                    f"""
-<span class="metric-pill">🎯 Score: {ana['score_final']:.1f}</span>
-<span class="metric-pill">📣 Engaj.: {ana['engajamento']:.1f}</span>
-<span class="metric-pill">💶 Conv.: {ana['conversao']:.1f}</span>
-""",
-                    unsafe_allow_html=True,
+                    f"**Análise automática:** "
+                    f"Score {a['score_final']}/10 · Engaj. {a['engajamento']}/10 · Conv. {a['conversao']}/10"
                 )
+            elif not limits["analysis"]:
+                st.caption("🔒 Análise automática apenas no Pro.")
 
-            # Adicionar ao planner
-            day_default = date.today().isoformat()
-            col_dia, col_hora = st.columns(2)
-            with col_dia:
+            st.markdown("---")
+            st.markdown("**Adicionar ao planner**")
+            d_col, h_col = st.columns(2)
+            with d_col:
                 day = st.date_input(
                     "Dia", value=date.today(), key=f"day_{vid}"
-                ).isoformat()
-            with col_hora:
+                )
+            with h_col:
                 time_str = st.time_input(
-                    "Hora", value=datetime.strptime("18:00", "%H:%M").time(), key=f"time_{vid}"
+                    "Hora",
+                    value=datetime.strptime("18:00", "%H:%M").time(),
+                    key=f"time_{vid}",
                 ).strftime("%H:%M")
 
-            if st.button(
-                "➕ Adicionar ao planner",
-                key=f"add_planner_{vid}",
-            ):
-                events = load_planner()
-
-                # verificar limite diário
-                if st.session_state.planner_added_today >= get_plan_limits(plan)[
-                    "max_planner_day"
-                ]:
-                    st.warning(
-                        "Chegaste ao limite diário de entradas no planner para este plano."
-                    )
-                else:
-                    events.append(
-                        {
-                            "id": new_id(),
-                            "day": day,
-                            "time": time_str,
-                            "platform": platform,
-                            "title": var["titulo"],
-                            "caption": var["legenda"],
-                            "hashtags": var.get("hashtags", []),
-                            "score": float(analysis.get(vid, {}).get("score_final", 0))
-                            if analysis
-                            else None,
-                            "status": "planned",
-                            "created_at": datetime.utcnow().isoformat(),
-                        }
-                    )
-                    save_planner(events)
-                    st.session_state.planner_added_today += 1
-                    st.success("Adicionado ao planner ✅")
+            if st.button("➕ Adicionar", key=f"add_{vid}"):
+                st.session_state.planner_events.append(
+                    {
+                        "id": f"{datetime.utcnow().timestamp()}_{vid}",
+                        "day": day.isoformat(),
+                        "time": time_str,
+                        "title": var["titulo"],
+                        "platform": platform,
+                        "caption": var["legenda"],
+                        "hashtags": var.get("hashtags", []),
+                        "completed": False,
+                        "score": var.get("analysis", {}).get("score_final")
+                        if limits["analysis"]
+                        else None,
+                    }
+                )
+                st.success("Adicionado ao planner ✅")
 
 
-# =========================
-# PÁGINA – PLANNER
-# =========================
+# ---------------- PÁGINA PLANNER (v9.1) ----------------
+def page_planner(plan: str):
+    st.subheader("📅 Planner semanal")
 
-def week_bounds(anchor: date):
-    # semana de segunda a domingo
-    monday = anchor - timedelta(days=anchor.weekday())
-    sunday = monday + timedelta(days=6)
-    return monday, sunday
-
-
-def page_planner(plan):
-    st.markdown("## 📅 Planner semanal")
-
-    limits = get_plan_limits(plan)
-
-    col_prev, col_next, col_anchor = st.columns([1, 1, 2])
+    # navegação de semanas
+    col_prev, col_center, col_next = st.columns([1, 2, 1])
     with col_prev:
         if st.button("« Semana anterior"):
-            st.session_state.anchor_date -= timedelta(days=7)
-            safe_rerun()
+            st.session_state.week_anchor -= timedelta(days=7)
     with col_next:
-        if st.button("Próxima semana »"):
-            st.session_state.anchor_date += timedelta(days=7)
-            safe_rerun()
-    with col_anchor:
-        anchor_ui = st.date_input(
-            "Âncora", value=st.session_state.anchor_date
-        )
-        if anchor_ui != st.session_state.anchor_date:
-            st.session_state.anchor_date = anchor_ui
-            safe_rerun()
+        if st.button("Semana seguinte »"):
+            st.session_state.week_anchor += timedelta(days=7)
+    with col_center:
+        anchor_ui = st.date_input("Semana de referência", value=st.session_state.week_anchor)
+        if anchor_ui != st.session_state.week_anchor:
+            st.session_state.week_anchor = anchor_ui
 
-    anchor = st.session_state.anchor_date
-    week_start, week_end = week_bounds(anchor)
-    st.markdown(
-        f"**Semana de {week_start.strftime('%d/%m')} a {week_end.strftime('%d/%m')}**"
+    week_start, week_end = week_bounds(st.session_state.week_anchor)
+    st.caption(
+        f"Semana de {week_start.strftime('%d/%m')} a {week_end.strftime('%d/%m')}"
     )
 
-    events = load_planner()
-    week_events = [
-        e
-        for e in events
-        if week_start.isoformat() <= e["day"] <= week_end.isoformat()
-    ]
-    week_events.sort(key=lambda e: (e["day"], e["time"]))
-
-    # mapa dia -> eventos
-    by_day = { (week_start + timedelta(days=i)).isoformat(): [] for i in range(7) }
-    for e in week_events:
-        by_day[e["day"]].append(e)
+    events = st.session_state.planner_events
+    days = [week_start + timedelta(days=i) for i in range(7)]
+    by_day: Dict[str, List[Dict[str, Any]]] = {d.isoformat(): [] for d in days}
+    for ev in events:
+        if week_start.isoformat() <= ev["day"] <= week_end.isoformat():
+            by_day.setdefault(ev["day"], []).append(ev)
 
     cols = st.columns(7)
     day_labels = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
 
-    for idx, col in enumerate(cols):
-        d = week_start + timedelta(days=idx)
+    for idx, d in enumerate(days):
         d_iso = d.isoformat()
         posts = by_day.get(d_iso, [])
-
-        with col:
+        with cols[idx]:
+            # Cabeçalho centrado
             st.markdown(
-                f'<div class="planner-day-header">{day_labels[idx]}<br><span class="small-muted">{d.strftime("%d/%m")}</span></div>',
+                f"<div style='text-align:center; font-weight:600;'>{day_labels[idx]}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='text-align:center; color:gray; margin-bottom:8px;'>{d.strftime('%d/%m')}</div>",
                 unsafe_allow_html=True,
             )
 
             if not posts:
-                st.markdown('<span class="small-muted">Sem posts.</span>', unsafe_allow_html=True)
-                continue
-
-            for e in posts:
-                score_txt = (
-                    f"{e['score']:.1f}" if isinstance(e.get("score"), (int, float)) else "-"
-                )
                 st.markdown(
-                    f"""
-<div class="planner-card">
-  <div class="planner-card-title">{e['time']} · {e['platform']}</div>
-  <div class="small-muted">{e['title']}</div>
-  <div class="small-muted">Score: {score_txt}</div>
-</div>
-""",
+                    "<div style='text-align:center; font-size:0.8rem; color:#888;'>Sem tarefas</div>",
                     unsafe_allow_html=True,
                 )
+                continue
 
-                exp_key = f"exp_{e['id']}"
+            # ordenar por hora
+            for ev in sorted(posts, key=lambda e: e["time"]):
+                completed = bool(ev.get("completed"))
+                bg = "#E8FDF1" if completed else "#f7f7f7"
+                status_txt = "Concluído ✅" if completed else "Pendente"
+                status_color = "#00c46b" if completed else "#666666"
+
+                card_html = f"""
+<div style="
+    background:{bg};
+    border-radius:12px;
+    padding:8px 10px;
+    margin:0 auto 8px auto;
+    border:1px solid #ddd;
+    text-align:left;
+    max-width:220px;
+">
+  <div style="font-size:0.8rem; color:#555;">{ev['time']} · {ev['platform']}</div>
+  <div style="font-weight:600; font-size:0.85rem;">{ev['title']}</div>
+  <div style="font-size:0.75rem; color:{status_color}; margin-top:4px;">{status_txt}</div>
+</div>
+"""
+                st.markdown(card_html, unsafe_allow_html=True)
+
+                # Detalhes + ações
                 with st.expander("Ver detalhes", expanded=False):
-                    st.markdown(f"**Legenda:**\n\n{e['caption']}")
-                    tags_html = " ".join(
-                        f'<span class="hashtag-pill">#{t.lstrip("#")}</span>'
-                        for t in e.get("hashtags", [])
-                    )
-                    st.markdown("**Hashtags:**", unsafe_allow_html=True)
-                    st.markdown(tags_html or "–", unsafe_allow_html=True)
+                    st.markdown(f"**Legenda:**\n\n{ev['caption']}")
+                    if ev.get("hashtags"):
+                        st.markdown("**Hashtags:**")
+                        st.code(" ".join(ev["hashtags"]))
+                    if ev.get("score") is not None:
+                        st.markdown(f"**Score previsto:** {ev['score']}/10")
 
-                    status = e.get("status", "planned")
-                    st.markdown(f"**Estado atual:** `{status}`")
-
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button("✅ Marcar como concluído", key=f"done_{e['id']}"):
-                            e["status"] = "done"
-                            # registar no histórico
-                            history = load_history()
-                            history.append(
-                                {
-                                    "id": e["id"],
-                                    "day": e["day"],
-                                    "time": e["time"],
-                                    "platform": e["platform"],
-                                    "title": e["title"],
-                                    "score": e.get("score"),
-                                    "completed_at": datetime.utcnow().isoformat(),
-                                }
-                            )
-                            save_history(history)
-                            save_planner(events)
-                            st.success("Marcado como concluído e enviado para Performance ✅")
-                            safe_rerun()
-                    with c2:
-                        if st.button("🗑 Remover", key=f"del_{e['id']}"):
-                            events = [ev for ev in events if ev["id"] != e["id"]]
-                            save_planner(events)
-                            st.warning("Post removido do planner.")
-                            safe_rerun()
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if not completed:
+                            if st.button(
+                                "✔ Concluir",
+                                key=f"done_{ev['id']}",
+                            ):
+                                # Marca como concluído uma única vez
+                                ev["completed"] = True
+                                st.success("Tarefa marcada como concluída ✅")
+                                st.experimental_rerun()
+                        else:
+                            st.markdown("Concluído ✅")
+                    with col_b:
+                        if st.button(
+                            "🗑 Remover",
+                            key=f"del_{ev['id']}",
+                        ):
+                            st.session_state.planner_events = [
+                                e for e in st.session_state.planner_events if e["id"] != ev["id"]
+                            ]
+                            st.warning("Tarefa removida.")
+                            st.experimental_rerun()
 
 
-# =========================
-# PÁGINA – PERFORMANCE
-# =========================
+# ---------------- PÁGINA PERFORMANCE ----------------
+def page_performance(plan: str):
+    st.subheader("📊 Performance (Pro)")
 
-def page_performance(plan):
-    if plan == "Starter":
-        st.markdown("## 📊 Performance")
-        st.warning(
-            "A aba de performance detalhada é exclusiva do plano **Pro**. "
-            "Faz upgrade para ver histórico, scores e resultados. 💹"
-        )
+    if not PLAN_CONFIG[plan]["performance"]:
+        st.info("🔒 A aba de performance detalhada é exclusiva do plano Pro.")
         return
 
-    st.markdown("## 📊 Performance (Pro)")
-
-    history = load_history()
-    if not history:
-        st.info("Ainda não tens posts concluídos. Marca alguns no Planner para ver aqui.")
+    completed = [e for e in st.session_state.planner_events if e.get("completed")]
+    if not completed:
+        st.info("Ainda não tens tarefas concluídas.")
         return
 
-    history_sorted = sorted(
-        history, key=lambda h: (h["day"], h["time"]), reverse=True
-    )
+    st.markdown(f"**Total de publicações concluídas:** {len(completed)}")
 
-    st.markdown("### Resultados concluídos")
-    st.dataframe(
-        history_sorted,
-        use_container_width=True,
-        hide_index=True,
-    )
+    scores = [e["score"] for e in completed if isinstance(e.get("score"), (int, float))]
+    if scores:
+        avg_score = sum(scores) / len(scores)
+        st.markdown(f"**Score médio previsto:** {avg_score:.1f}/10")
+    else:
+        st.caption("Ainda não há scores calculados (gera conteúdo no Pro).")
 
-
-# =========================
-# PÁGINA – EXPORT
-# =========================
-
-def page_export(plan):
-    st.markdown("## 📤 Export")
-
-    planner = load_planner()
-    if not planner:
-        st.info("Não há nada no planner para exportar ainda.")
-        return
-
-    # export txt básico para todos os planos
-    lines = []
-    for e in sorted(planner, key=lambda e: (e["day"], e["time"])):
-        lines.append(
-            f"{e['day']} {e['time']} · {e['platform']} · {e['title']}\n{e['caption']}\n"
-        )
-        if e.get("hashtags"):
-            tags = " ".join(f"#{t.lstrip('#')}" for t in e["hashtags"])
-            lines.append(tags)
-        lines.append("\n" + "-" * 40 + "\n")
-
-    txt = "\n".join(lines)
-    st.download_button(
-        "⬇️ Download .txt",
-        data=txt,
-        file_name="contentforge_planner.txt",
-        mime="text/plain",
-    )
-
-    if plan == "Pro":
-        # export csv simples no Pro
-        import csv
-        import io
-
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["day", "time", "platform", "title", "score", "status"])
-        for e in sorted(planner, key=lambda e: (e["day"], e["time"])):
-            writer.writerow(
-                [
-                    e["day"],
-                    e["time"],
-                    e["platform"],
-                    e["title"],
-                    e.get("score"),
-                    e.get("status", "planned"),
-                ]
-            )
-
-        st.download_button(
-            "⬇️ Download .csv (Pro)",
-            data=output.getvalue(),
-            file_name="contentforge_planner.csv",
-            mime="text/csv",
-        )
+    st.markdown("---")
+    for ev in sorted(completed, key=lambda e: (e["day"], e["time"]), reverse=True):
+        linha = f"- {ev['day']} {ev['time']} · {ev['platform']} · **{ev['title']}**"
+        if ev.get("score") is not None:
+            linha += f" ({ev['score']}/10)"
+        st.markdown(linha)
 
 
-# =========================
-# MAIN
-# =========================
-
+# ---------------- MAIN ----------------
 def main():
-    init_session_state()
-    (
-        plan,
-        brand,
-        niche,
-        tone,
-        copy_mode,
-        seguidores,
-        engaj,
-        alcance,
-    ) = sidebar_profile()
+    plan, brand, niche, tone, copy_mode = sidebar_profile()
 
-    st.markdown("## ContentForge v9.0 🍏")
-    st.markdown(
-        "Gera conteúdo inteligente, organiza num planner semanal e, no plano Pro, analisa a força de cada publicação."
+    st.title("ContentForge v9.1")
+    st.caption(
+        "Gera conteúdo com IA, organiza num planner semanal e acompanha a performance (Pro)."
     )
 
-    tab_gerar, tab_planner, tab_perf, tab_export = st.tabs(
-        ["⚡ Gerar", "📅 Planner", "📊 Performance", "📤 Export"]
-    )
+    tab_gen, tab_plan, tab_perf = st.tabs(["⚡ Gerar", "📅 Planner", "📊 Performance"])
 
-    with tab_gerar:
+    with tab_gen:
         page_generate(plan, brand, niche, tone, copy_mode)
-    with tab_planner:
+    with tab_plan:
         page_planner(plan)
     with tab_perf:
         page_performance(plan)
-    with tab_export:
-        page_export(plan)
 
 
 if __name__ == "__main__":
